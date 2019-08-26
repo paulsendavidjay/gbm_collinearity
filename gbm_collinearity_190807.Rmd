@@ -1,0 +1,266 @@
+---
+title: "Multi Collinearity in GBT"
+date: "`r format(Sys.Date(), format='%A %B %d, %Y')`"
+editor_options:
+  chunk_output_type: inline
+output:
+  html_document: default
+  pdf_document: default
+bibliography: bibliography.bib
+---
+
+
+## SUMMARY
+This study demonstrates that while improving model fit, the presence of correlated features in a gradient boosted machine has an impact on the gain of those features otherwise entered individually. The implication is that feature importance, at the model and individual level (e.g. gain and Shapley values), depends on the number and degree of correlated features. Consideration should be given to the need for unique explainability in addition to the need for performance during feature selection.
+
+
+## BACKGROUND
+One of the outstanding features of gradient boosted trees is that they select variables based on their ability to 'explain' - in each successive step - the variance remaining from the step before. One reason this greedy selection is outstanding is that it can handle colinear features, selecting one or the other of a correlated pair, depending on which is more predictive at any split. In this case their anti-correlated aspects are themselves predictive. However, although allowing correlated features to figure into a model may improve performance, it has the potential, in theory, to diminish their relative importance.
+
+Take for example the extreme case of including a duplicated feature with perfect correlation. For every split in which these duplicate features can best explain the remaining variance, the algorithm should select one or the other at random. In many measures of feature importance, the metric depends at least on how many times a feature is observed in a split, and sometimes in how much of the variance is explained. In theory then, the relative importance between two perfectly correlated features should be equal and less than their relative importance in a model in which only one of these features is included.
+
+While in theory this example should be enough to demonstrate the point, a practical example is often more believable. So with this in mind, a study was conducted to show that correlated features can reduce the relative importance of feature, and even further than it can lower its relative ranking.
+
+## METHOD
+Synthetic data were generated using a non-linear functions based on Friedman and Pospecu [-@friedman2008, pp. 25]. 
+$$w_1*\prod_{j=1}^{3}exp(-3*(1-X_j)^2) - w_2*exp(-2*(X_4 - X_5)) + w_3*sin^2(\pi*X_c) - w_4*(X_7 - X_8)$$ 
+Weights $w_1-w_4$ were used adjust the relative contribution of $X_c$ and other variables to the construction of the target. Model error added to the target was selected from $N(0,\sigma)$ with $\sigma$ chosen to produce a 2:1 signal-to-noise ratio.
+
+Correlated features were created using the _mvtnorm_ package. Three features were created: $X_6$, $X_{21}$, and $X_c$ using the correlation matrix:
+$$\begin{pmatrix} 1 & 0.85 & r_{1,3} \\\ 0.85 & 1 & 0.85 \\\ r_{1,3} & 0.85 & 1 \end{pmatrix}$$
+
+The correlation between $X_6$ and $X_c$ ($r_{1,3}$) was tested at 0.65, 0.85, and 0.95, thus allowing $X_6$ to have less, equal, or more, explanatory power compared to $X_{21}$. All other $X$ variables were selected from a uniform normal distribution of the values 0-9 for a total of 5000 observations.
+
+The function weights $w_1$, $w_2$, and $w_4$, were set to 9, 0.8, 2.5, respectively. $w_3$ was tested at [0.1, 0.2, 0.5, 1, 2, 3, 4, 5]. 
+
+For each combination of function parameters, three xgboost models were built 10 times each using different random seeds the following parameters:
+
+* nrounds: 1500
+* early_stopping_rounds: 10
+* eta = 0.1
+* max_depth: 4
+
+All other xgb parameters used default settings. One model used $X_c$ as an explanatory feature but excluded $X_6$ and $X_{21}$ (Model C). A second model (Model A) used the correlated variable $X_6$ but not $X_c$, while the third (Model B) used the both colinear variables $X_6$ and $X_{21}$ without $X_c$. All other variables used in the target function were included, as were an additional 13 variables generated using the same random integer selection used for variables $X_1$ thru $X_8$.
+
+
+```{r global_options, include=FALSE}
+suppressMessages(suppressWarnings(library(knitr)))
+knitr::opts_chunk$set( fig.height=3.5, fig.width=8, echo=FALSE,
+                       dev='pdf', fig.align="center",
+                       cache=TRUE)
+rm(list = ls())
+knitr_output_type <- "latex"
+```
+
+
+```{r setup, include=FALSE}
+# load packages, data, suplementary functions and data
+# suppressMessages(suppressWarnings(library(jcolors))) # helper functions
+suppressMessages(suppressWarnings(library(ggplot2))) # plotting
+suppressMessages(suppressWarnings(library(data.table))) 
+suppressMessages(suppressWarnings(library(magrittr))) # data processing
+suppressMessages(suppressWarnings(library(knitr))) # output formatting
+suppressMessages(suppressWarnings(library(Hmisc))) # data exploration
+suppressMessages(suppressWarnings(library(mvtnorm))) # gbm building
+suppressMessages(suppressWarnings(library(xgboost))) # data splitting
+suppressMessages(suppressWarnings(library(dplyr)))
+# suppressWarnings(suppressMessages(library(grid))) # output formatting
+# suppressWarnings(suppressMessages(library(gridExtra))) # output formatting
+
+# suppressMessages(suppressWarnings(library(foreach))) # parallel processing
+# suppressMessages(suppressWarnings(library(doMC))) # parallel processing
+# suppressMessages(suppressWarnings(library(iterators))) 
+
+
+##########################################################
+# FUNCTIONS
+
+# main_dir <- "~/GBT_Collinearity/"
+main_dir <- "~/Dropbox/Personal/Profesional/Articles/GBT_Collinearity/"
+source(file.path(main_dir, "create_data_190806.R"))
+
+out <- fread(file.path(main_dir, "colin_190806_out.csv"))
+logs <- fread(file.path(main_dir, "colin_190806_log.csv"))
+shaps <- fread(file.path(main_dir, "colin_190806_shap.csv"))
+
+out2 <- fread(file.path(main_dir, "colin_190807_out.csv"))
+logs2 <- fread(file.path(main_dir, "colin_190807_log.csv"))
+shaps2 <- fread(file.path(main_dir, "colin_190807_shap.csv"))
+
+max_iter <- max(out$i)
+out2$i <- out2$i + max_iter
+logs2$i <- logs2$i + max_iter
+shaps2$i <- shaps2$i + max_iter
+
+
+out <- rbind(out, out2)
+logs <- rbind(logs, logs2)
+shaps <- rbind(shaps, shaps2)
+rm(out2, logs2, shaps2)
+
+out$Feature <- gsub("C3", "XC", out$Feature)
+names(shaps)[2] <- "C_XC"
+
+
+```
+
+```{r data_preprocessing}
+# variable creation, variable transformation, data exclusions
+means <- out[Feature %in% c(paste0("X", 1:8), "X21", "XC"), .(N = .N,
+                                                        mn_rank = mean(rnk),
+                                                        mn_gain = mean(Gain),
+                                                        mn_freq = mean(Frequency),
+                                                        min_rank = min(rnk),
+                                                        max_rank = max(rnk)),
+             by = .(Feature, mdl, f3_wt, r13)] 
+means[, r13_label := paste0("r(X6,XC): ", r13)]
+means[, mdl_label := ifelse(mdl == "A", "A: X6",
+                            ifelse(mdl == "B", "B: X6 & X21", "C: XC"))]
+# means[, mdl_label := factor(mdl_label, levels = c("C: C6", "A: X6", "B: X6 & X21"))]
+# means[, Feature := factor(Feature, levels = paste0("X", 1:21))]
+
+log_means <- logs[, .(N = .N,
+                      min_train_rmse = min(train_rmse)                                  ),
+                  by = .(i, mdl, f3_wt, r13)]
+log_means <- log_means[, .(N = .N,
+                           mn_min_train_rmse = mean(min_train_rmse)),
+                       by = .(mdl, f3_wt, r13)]
+log_means[, r13_label := paste0("r(X6,XC): ", r13)]
+log_means[, mdl_label := ifelse(mdl == "A", "A: X6",
+                            ifelse(mdl == "B", "B: X6 & X21", "C: XC"))]
+
+```
+
+#### RESULTS
+##### Gains
+From left-to-right and from top-to-bottom, the impact of increasing the values of $w_3$ is seen in the increasing gains models A, B and C. Of particular importance, these figures show that when both colinear variables are entered into the model with equal correlation to $X_c$, the gain for $X_6$ is less than what it would be if it were the only variable in the model. 
+
+```{r}
+ggplot(means[Feature %in% c("X6", "X21", "XC")], aes(x = as.factor(f3_wt), y = mn_gain)) +
+  geom_bar(aes(fill = interaction(Feature,mdl)), size = 2, alpha = 0.8, stat="identity", position=position_dodge()) +
+  facet_wrap(~ r13_label, ncol = 1) +
+  ggtitle("Mean Gain for Correlated Variables X6 & X21 at Different Function Weights
+            and r-value for X6: w/ & w/o X21") +
+  xlab(bquote('w'[3]))
+
+```
+
+The close-up shows that in each of these models, variable importance, as measured by gain, increases as the contribution of $C_3$ is increased in data generation. Importantly, all models show that when $X_{21}$ is added to the model, the relative contribution of $X_6$ drops. This pattern was true across all values of $w_3$ and $r_{1,3}$.
+
+```{r}
+ggplot(means[Feature %in% c("X6", "X21", "XC") & f3_wt %in% c(0.5,2,3) &
+               r13 == 0.85], aes(x = as.factor(f3_wt), y = mn_gain)) +
+  geom_bar(aes(fill = interaction(Feature,mdl)), size = 2, alpha = 1, stat="identity", position=position_dodge()) +
+  # facet_wrap(~ r13_label, ncol = 1) +
+  ggtitle("Mean Gain for XC and Correlated Variables X6 & X21 Across Models",
+          subtitle = "at Different Values of w3 and r(X6,XC) = 0.85") +
+  xlab(bquote('w'[3])) +
+  theme(legend.position = "bottom")
+```
+
+```{r, eval = FALSE}
+ggplot(means[Feature %in% c("X6", "X21", "C3")], aes(x = as.factor(f3_wt), y = mn_freq)) +
+  geom_bar(aes(fill = interaction(Feature,mdl)), size = 2, alpha = 0.8, stat="identity", position=position_dodge()) +
+  facet_wrap(~ r13_label, ncol = 1) +
+  ggtitle("Mean Frequency for Correlated Variables X6 & X21 at Different Function Weights
+            and r-value for X6: w/ & w/o X21") +
+  xlab("f(C3) wt") 
+
+```
+
+##### Rank Ordering
+Mean variable rankings for each model at different $w_3$ values shows how much the relative impact of adding a correlated feature on gain depends on the contribution strength of the underlying factor. For example, with $w_3$ equals 1, $C_3$ and both of the correlated variables appear last in rank. When $w_3$ equals 2, $C_3$ moves up to the highest rankings, while the correlated features in both models A and B remain in last place. At $w_3$, $X_6$ moves up to fourth place in Model A, but remains in last place with $X_{21}$ in Model B. At the highest value tests for $w_3$, all three variables are in top ranking position across all three models. Thus, the addition of a correlated feature can at times have no impact on rankings, and at other times have a (non-statistical) significant impact.
+
+```{r ranks_bar, fig.width = 2.5, fig.height=4}
+means[, Feature := factor(Feature, levels = c(paste0("X", c(4,5,8,7,2,1,3,6,21)), "XC"))]
+ggplot(means[f3_wt %in% c(1,2,3,4,5) & r13 == 0.85], aes(x = mdl, y = mn_rank)) +
+  geom_bar(aes(fill = Feature), size = 2, alpha = 0.9, 
+           stat="identity", position=position_dodge()) +
+  facet_wrap(~ paste0("w3 = ", f3_wt), ncol = 1) +
+  geom_text(aes(x=mdl, y=mn_rank, label=Feature, group = Feature), vjust=1.4, 
+            position=position_dodge(width = 0.9), size = 2.5)   +
+  ggtitle("Mean Variable Rankings in Models A, B, & C",
+    subtitle = "at Different Values of W3 and r(X6,XC) = 0.85") +
+  theme(legend.position = "None")
+```
+
+
+##### Error
+Finally, across all models built, we can see that while adding correlated variable $X_{21}$ to the model can have an impact on the relative importance of $X_6$, in all cases the training error is reduced by the addition. This suggests there may be some trade-off between explainability and performance.
+
+```{r rmse}
+ggplot(log_means, aes(x = f3_wt, y = mn_min_train_rmse)) +
+  geom_line(aes(color = mdl)) +
+  facet_grid(~ r13_label) + 
+  ggtitle("Mean Min Train RMSE",
+          subtitle = "at Different Values of w3 and r(X6,XC) = 0.85") +
+  xlab(bquote('w'[3]))
+```
+
+
+##### SHAP EXPLORATION
+Shapley values were extracted for the training data of all three models. One of the features of Shapley values is that they are additive (ref). It would be interesting to see if the Shapley values of the correlated features 
+
+
+
+```{r shap_exploration, fig.height = 3}
+params <- unique(out[, .(i, f3_wt, r13)])
+shaps <- merge(shaps, params, by = "i")
+# 
+# mean_shaps <- shaps[, .(A_X6 = mean(A_X6, na.rm = T),
+#           B_X6 = mean(B_X6, na.rm = T),
+#           B_X21 = mean(B_X21, na.rm = T),
+#           B_X6_21 = mean(B_X6_21, na.rm = T),
+#           C_XC = mean(C_XC, na.rm = T)),
+#       by = .(i, f3_wt, r13)][, .(A_X6 = mean(A_X6, na.rm = T),
+#           B_X6 = mean(B_X6, na.rm = T),
+#           B_X21 = mean(B_X21, na.rm = T),
+#           B_X6_21 = mean(B_X6_21, na.rm = T),
+#           C_XC = mean(C_XC, na.rm = T)),
+#       by = .(f3_wt, r13)]
+# melted_mean_shaps <- melt(mean_shaps, id.vars = c("r13", "f3_wt"), 
+#                measure.vars = c("B_X6", "B_X21", "B_X6_21", "C_XC"))
+# melted_mean_shaps[["f3_wt_lab"]] <- paste0("w3: ", melted_mean_shaps[["f3_wt"]])
+# melted_mean_shaps[["r13_lab"]] <- paste0("r(X6,C): ", melted_mean_shaps[["r13"]])
+#  
+# ggplot(melted_mean_shaps[f3_wt %in% c(0.1, 0.5, 2, 5)], 
+#        aes(x = variable, y = value)) +
+#   geom_bar(aes(fill = variable), size = 2, alpha = 0.9, 
+#            stat="identity", position=position_dodge()) +
+#   facet_grid(r13_lab ~ f3_wt_lab, scales = "free") +
+#   ggtitle("Shapley Values of Correlated Variables in Models B & C")
+
+```
+
+As the contribution of $C_3$ increases, the correlation between the sum of $X_6$ and $X_{21}$ Shapley values and those of $C_3$ decreases. This makes sense, for as the importance of $C_3$ in target creation increases, the variance in $X_6$ and $X_{21}$ that is not shared by $C_3$ would impart a greater reduction in their predictive power.
+
+Of particular interest, there is a tight correlation between the Shapley values of $X_C$ and that of the sum of Shapley values from the correlated variables. The motivation behind testing for this relationship comes from the additivity property of Shapley values: two variables that are correlated with a feature contributing to the target generating function should contribute to model predictions relative to the degree that the target generating feature contributes to the target and the degree to which the model features are correlated with it. In general, this is the pattern observed.
+
+```{r}
+melted <- melt(shaps, id.vars = c("i", "C_XC", "r13", "f3_wt"), 
+               measure.vars = c("B_X6", "B_X21", "B_X6_21"))
+
+melted[["f3_wt_lab"]] <- paste0("w3: ", melted[["f3_wt"]])
+melted[["r13_lab"]] <- paste0("r(X6,C): ", melted[["r13"]])
+
+suppressWarnings(suppressMessages(print(
+  ggplot(melted[f3_wt %in% c(0.1, 0.5, 2, 5)][sample(seq(.N), 50000)], 
+       aes(x = C_XC, y = value)) +
+  geom_point(aes(color = variable), alpha = 0.1) +
+  geom_smooth(aes(color = variable), se = FALSE, method = "glm") +
+  facet_wrap(r13_lab ~ f3_wt_lab, scales = "free", ncol = 4) +
+  geom_abline(slope = 1) +
+  ylab("Shapley Value of Model B") +
+  xlab("Shapley Value of Model C: XC") +
+  ggtitle("Shapley Value Correlations Between True and Correlated Signals")
+)))
+
+```
+
+
+# SESSION INFORMATION
+```{r sessionInfo}
+sessionInfo()
+```
+
+# References
